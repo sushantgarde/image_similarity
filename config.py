@@ -27,7 +27,7 @@ IMAGE_SIZE = (224, 224)
 
 # Search Configuration
 TOP_K = 10  # Number of similar images to return
-SIMILARITY_THRESHOLD = 0.5  # Minimum similarity score (0-1)
+SIMILARITY_THRESHOLD = 0.0  # Changed from 0.5 to 0.0 - show all results, ranked by similarity
 
 # Feature Files
 EMBEDDINGS_FILE = EMBEDDINGS_FOLDER / 'features.npy'

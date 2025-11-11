@@ -30,7 +30,6 @@
         <div class="query-section">
             <h2 class="section-title">Your Image</h2>
             <div class="query-image-container">
-                <!-- Query Image - just use the filename -->
                 <img src="/static/uploads/{{ query_image }}" alt="Query Image" class="query-image">
             </div>
         </div>
@@ -38,38 +37,39 @@
         <!-- Results Section -->
         <div class="results-section">
             <h2 class="section-title">
-                <span class="results-count">{{ results|length }}</span> Similar Images Found
+                <span class="results-count">{{ similar_images|length }}</span> Similar Images Found
             </h2>
 
+            {% if similar_images|length > 0 %}
             <div class="results-grid">
-                {% for result in results %}
+                {% for image in similar_images %}
                 <div class="result-card" style="animation-delay: {{ loop.index0 * 0.1 }}s">
                     <div class="result-image-container">
-                        <!-- Similar Images - use the full relative path -->
-                            <img src="/{{ image.path }}" alt="{{ image.filename }}" class="result-image">
-                             alt="Similar Image {{ loop.index }}"
+                        <img src="/{{ image.path }}"
+                             alt="{{ image.filename }}"
                              class="result-image"
                              loading="lazy">
                         <div class="similarity-badge">
                             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                 <path d="M9 16.17L4.83 12L3.41 13.41L9 19L21 7L19.59 5.59L9 16.17Z" fill="currentColor"/>
                             </svg>
-                            {{ "%.1f"|format(result.similarity * 100) }}% Match
+                            {{ "%.1f"|format(image.score) }}% Match
                         </div>
                     </div>
                     <div class="result-info">
-                        <p class="result-filename">{{ result.filename }}</p>
+                        <p class="result-filename">{{ image.filename }}</p>
                         <div class="similarity-bar">
-                            <div class="similarity-fill" style="width: {{ result.similarity * 100 }}%"></div>
+                            <div class="similarity-fill" style="width: {{ image.score }}%"></div>
                         </div>
                     </div>
                 </div>
                 {% endfor %}
             </div>
+            {% endif %}
         </div>
 
-        <!-- No Results Message (if needed) -->
-        {% if results|length == 0 %}
+        <!-- No Results Message -->
+        {% if similar_images|length == 0 %}
         <div class="no-results">
             <div class="no-results-icon">
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">

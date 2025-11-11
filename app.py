@@ -148,6 +148,14 @@ def search():
             results = similarity_search.search(query_features, top_k=top_k)
             logger.info(f"Search completed. Found {len(results)} results")
 
+            # DEBUG: Log top 5 similarity scores
+            if len(results) > 0:
+                logger.info("--- Top Similarity Scores ---")
+                for idx, (path, score) in enumerate(results[:5]):
+                    logger.info(f"  Top {idx + 1}: score={score:.4f} ({score * 100:.2f}%)")
+            else:
+                logger.warning("No results returned from search!")
+
             # Check if no results found
             if len(results) == 0:
                 logger.warning("No similar images found")
@@ -156,7 +164,7 @@ def search():
                                        similar_images=[],
                                        num_results=0)
 
-            # FIXED: Get correct relative path for query image (just filename, not uploads/)
+            # Get correct relative path for query image (just filename, not uploads/)
             query_image = os.path.basename(filepath)
             logger.info(f"Query image filename: {query_image}")
 

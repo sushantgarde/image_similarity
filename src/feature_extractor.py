@@ -6,6 +6,7 @@ from typing import List, Union
 import logging
 from pathlib import Path
 from tqdm import tqdm
+from torchvision.models import ResNet50_Weights
 
 import config
 from .preprocessing import ImagePreprocessor
@@ -42,7 +43,7 @@ class FeatureExtractor:
         """
         try:
             if self.model_name == 'resnet50':
-                model = models.resnet50(pretrained=True)
+                model = models.resnet50(weights=ResNet50_Weights.DEFAULT)
                 # Remove final classification layer
                 model = nn.Sequential(*list(model.children())[:-1])
 
