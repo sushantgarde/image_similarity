@@ -109,6 +109,66 @@ class SimilaritySearch:
             logger.error(f"Error during search: {str(e)}")
             raise
 
+    def search_with_reranking(self, query_features: np.ndarray, top_k: int = 50,
+                              final_k: int = config.TOP_K) -> List[Tuple[str, float]]:
+        """
+        Two-stage search: fast retrieval + precise reranking.
+        First stage retrieves more candidates, second stage reranks with multiple metrics.
+
+        Args:
+            query_features: Query feature vector
+            top_k: Number of candidates to retrieve in first stage
+            final_k: Final number of results to return
+
+        Returns:
+            List of (image_path, similarity_score) tuples
+        """
+        if not self.is_built:
+            raise ValueError("Index not built. Call build_index() first.")
+
+        try:
+            # Stage 1: Fast retrieval of top candidates
+            candidates = self.search(query_features, top_k=top_k, threshold=0.0)
+
+            if len(candidates) == 0:
+                return []
+
+            # Stage 2: Rerank with more sophisticated similarity
+            reranked = []
+
+            for img_path, _ in candidates:
+                # Get candidate features
+                idx = self.image_paths.index(img_path)
+                candidate_feats = self.features[idx]
+
+                # Calculate multiple similarity metrics
+
+                # 1. Cosine similarity (most important)
+                cosine_sim = np.dot(query_features, candidate_feats)
+
+                # 2. Euclidean distance (converted to similarity)
+                euclidean_dist = np.linalg.norm(query_features - candidate_feats)
+                euclidean_sim = 1 / (1 + euclidean_dist)
+
+                # 3. Manhattan distance (converted to similarity)
+                manhattan_dist = np.sum(np.abs(query_features - candidate_feats))
+                manhattan_sim = 1 / (1 + manhattan_dist)
+
+                # Weighted combination (cosine is most important for normalized features)
+                combined_score = 0.6 * cosine_sim + 0.25 * euclidean_sim + 0.15 * manhattan_sim
+
+                reranked.append((img_path, float(combined_score)))
+
+            # Sort by combined score
+            reranked.sort(key=lambda x: x[1], reverse=True)
+
+            logger.info(f"Reranked {len(candidates)} candidates to top {final_k}")
+            return reranked[:final_k]
+
+        except Exception as e:
+            logger.error(f"Error during reranking: {str(e)}")
+            raise
+
     def save_index(self, index_path: Path = config.FAISS_INDEX_FILE,
                    paths_path: Path = config.IMAGE_PATHS_FILE):
         """
@@ -194,6 +254,166 @@ class SimilaritySearch:
             stats['faiss_total'] = self.index.ntotal
 
         return stats
+
+
+class SimilaritySearchPCA(SimilaritySearch):
+    """
+    Similarity search with PCA for dimensionality reduction and noise reduction.
+    Reduces feature dimensions while preserving most important information.
+    """
+
+    def __init__(self, use_faiss: bool = True, n_components: int = config.PCA_COMPONENTS):
+        """
+        Initialize similarity search with PCA.
+
+        Args:
+            use_faiss: Whether to use FAISS for search
+            n_components: Number of PCA components to keep
+        """
+        super().__init__(use_faiss)
+        from sklearn.decomposition import PCA
+        self.pca = PCA(n_components=n_components)
+        self.pca_fitted = False
+        self.n_components = n_components
+
+        logger.info(f"SimilaritySearchPCA initialized (n_components: {n_components})")
+
+    def build_index(self, features: np.ndarray, image_paths: List[str]):
+        """
+        Build search index with PCA transformation.
+
+        Args:
+            features: Feature matrix (num_images x feature_dim)
+            image_paths: List of corresponding image paths
+        """
+        try:
+            if len(features) != len(image_paths):
+                raise ValueError("Number of features must match number of image paths")
+
+            # Apply PCA transformation
+            logger.info(f"Applying PCA: {features.shape[1]} -> {self.n_components} dimensions")
+            features_pca = self.pca.fit_transform(features)
+            self.pca_fitted = True
+
+            explained_var = self.pca.explained_variance_ratio_.sum()
+            logger.info(f"PCA explained variance: {explained_var:.2%}")
+
+            # Normalize PCA features
+            norms = np.linalg.norm(features_pca, axis=1, keepdims=True) + 1e-8
+            features_pca = features_pca / norms
+
+            # Build index with reduced features
+            super().build_index(features_pca.astype('float32'), image_paths)
+
+        except Exception as e:
+            logger.error(f"Error building PCA index: {str(e)}")
+            raise
+
+    def search(self, query_features: np.ndarray, top_k: int = config.TOP_K,
+               threshold: float = config.SIMILARITY_THRESHOLD) -> List[Tuple[str, float]]:
+        """
+        Search for similar images with PCA transformation.
+
+        Args:
+            query_features: Query feature vector
+            top_k: Number of results to return
+            threshold: Minimum similarity threshold
+
+        Returns:
+            List of (image_path, similarity_score) tuples
+        """
+        if not self.pca_fitted:
+            raise ValueError("PCA not fitted. Build index first.")
+
+        try:
+            # Transform query features using fitted PCA
+            query_pca = self.pca.transform(query_features.reshape(1, -1))
+
+            # Normalize
+            query_pca = query_pca / (np.linalg.norm(query_pca) + 1e-8)
+
+            # Search using transformed features
+            return super().search(query_pca[0], top_k, threshold)
+
+        except Exception as e:
+            logger.error(f"Error during PCA search: {str(e)}")
+            raise
+
+    def search_with_reranking(self, query_features: np.ndarray, top_k: int = 50,
+                              final_k: int = config.TOP_K) -> List[Tuple[str, float]]:
+        """
+        Two-stage search with PCA transformation and reranking.
+
+        Args:
+            query_features: Query feature vector
+            top_k: Number of candidates to retrieve in first stage
+            final_k: Final number of results to return
+
+        Returns:
+            List of (image_path, similarity_score) tuples
+        """
+        if not self.pca_fitted:
+            raise ValueError("PCA not fitted. Build index first.")
+
+        try:
+            # Transform query features using fitted PCA
+            query_pca = self.pca.transform(query_features.reshape(1, -1))
+            query_pca = query_pca / (np.linalg.norm(query_pca) + 1e-8)
+
+            # Use parent's reranking with PCA features
+            return super().search_with_reranking(query_pca[0], top_k, final_k)
+
+        except Exception as e:
+            logger.error(f"Error during PCA reranking: {str(e)}")
+            raise
+
+    def save_index(self, index_path: Path = config.FAISS_INDEX_FILE,
+                   paths_path: Path = config.IMAGE_PATHS_FILE):
+        """
+        Save FAISS index, PCA model, and image paths to disk.
+
+        Args:
+            index_path: Path to save FAISS index
+            paths_path: Path to save image paths
+        """
+        try:
+            # Save PCA model
+            pca_path = config.PCA_MODEL_FILE
+            save_pickle(self.pca, pca_path)
+            logger.info(f"PCA model saved to {pca_path}")
+
+            # Save index and paths
+            super().save_index(index_path, paths_path)
+
+        except Exception as e:
+            logger.error(f"Error saving PCA index: {str(e)}")
+            raise
+
+    def load_index(self, index_path: Path = config.FAISS_INDEX_FILE,
+                   paths_path: Path = config.IMAGE_PATHS_FILE,
+                   features_path: Path = config.EMBEDDINGS_FILE):
+        """
+        Load FAISS index, PCA model, and image paths from disk.
+
+        Args:
+            index_path: Path to FAISS index
+            paths_path: Path to image paths
+            features_path: Path to features
+        """
+        try:
+            # Load PCA model
+            pca_path = config.PCA_MODEL_FILE
+            if pca_path.exists():
+                self.pca = load_pickle(pca_path)
+                self.pca_fitted = True
+                logger.info(f"PCA model loaded from {pca_path}")
+
+            # Load index and paths
+            super().load_index(index_path, paths_path, features_path)
+
+        except Exception as e:
+            logger.error(f"Error loading PCA index: {str(e)}")
+            raise
 
 
 def compute_similarity_matrix(features: np.ndarray) -> np.ndarray:

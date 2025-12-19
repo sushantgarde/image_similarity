@@ -5,8 +5,8 @@ from pathlib import Path
 import logging
 
 import config
-from src.feature_extractor import FeatureExtractor
-from src.similarity_search import SimilaritySearch
+from src.feature_extractor import FeatureExtractor, EnsembleFeatureExtractor
+from src.similarity_search import SimilaritySearch, SimilaritySearchPCA
 from src.utils import allowed_file, save_uploaded_file, get_image_paths, clean_upload_folder
 from src.preprocessing import load_and_validate_image
 
@@ -23,9 +23,38 @@ app.config['SECRET_KEY'] = config.SECRET_KEY
 app.config['MAX_CONTENT_LENGTH'] = config.MAX_CONTENT_LENGTH
 app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
 
-# Initialize feature extractor and similarity search
-feature_extractor = FeatureExtractor()
-similarity_search = SimilaritySearch(use_faiss=True)
+# Initialize feature extractor and similarity search based on config
+logger.info("=" * 70)
+logger.info("INITIALIZING IMAGE SIMILARITY SEARCH SYSTEM")
+logger.info("=" * 70)
+
+if config.USE_ENSEMBLE:
+    logger.info("🔧 Configuration: ENSEMBLE MODE")
+    logger.info(f"   Models: {config.ENSEMBLE_MODELS}")
+    feature_extractor = EnsembleFeatureExtractor(
+        model_names=config.ENSEMBLE_MODELS
+    )
+else:
+    logger.info("🔧 Configuration: SINGLE MODEL MODE")
+    logger.info(f"   Model: {config.MODEL_NAME}")
+    feature_extractor = FeatureExtractor(model_name=config.MODEL_NAME)
+
+if config.USE_PCA:
+    logger.info(f"🔧 Configuration: PCA ENABLED (n_components={config.PCA_COMPONENTS})")
+    similarity_search = SimilaritySearchPCA(
+        use_faiss=True,
+        n_components=config.PCA_COMPONENTS
+    )
+else:
+    logger.info("🔧 Configuration: STANDARD SIMILARITY SEARCH")
+    similarity_search = SimilaritySearch(use_faiss=True)
+
+if config.USE_RERANKING:
+    logger.info(f"🔧 Configuration: RERANKING ENABLED (candidates={config.RERANKING_CANDIDATES})")
+else:
+    logger.info("🔧 Configuration: RERANKING DISABLED")
+
+logger.info("=" * 70)
 
 # Global flag to check if index is loaded
 index_loaded = False
@@ -39,41 +68,60 @@ def initialize_search_index():
 
     try:
         # Check if pre-computed index exists
-        if (config.FAISS_INDEX_FILE.exists() and
-                config.IMAGE_PATHS_FILE.exists() and
-                config.EMBEDDINGS_FILE.exists()):
+        index_exists = config.FAISS_INDEX_FILE.exists() and config.IMAGE_PATHS_FILE.exists() and config.EMBEDDINGS_FILE.exists()
 
-            logger.info("Loading existing search index...")
+        # If using PCA, also check for PCA model
+        if config.USE_PCA:
+            index_exists = index_exists and config.PCA_MODEL_FILE.exists()
+
+        if index_exists:
+            logger.info("📦 Loading existing search index...")
             similarity_search.load_index()
             index_loaded = True
-            logger.info("Search index loaded successfully")
+
+            stats = similarity_search.get_statistics()
+            logger.info(f"✅ Search index loaded successfully")
+            logger.info(f"   - Images: {stats['num_images']}")
+            logger.info(f"   - Feature dimension: {stats['feature_dim']}")
+            logger.info(f"   - FAISS: {stats['use_faiss']}")
 
         else:
-            logger.info("No existing index found. Building new index...")
+            logger.info("🔨 No existing index found. Building new index...")
 
             # Get all images from dataset
             image_paths = get_image_paths(config.IMAGES_FOLDER)
 
             if len(image_paths) == 0:
-                logger.warning("No images found in dataset folder")
+                logger.warning("⚠️  No images found in dataset folder")
+                logger.warning(f"   Please add images to: {config.IMAGES_FOLDER}")
                 return False
 
+            logger.info(f"📁 Found {len(image_paths)} images in dataset")
+
             # Extract features
+            logger.info("🎨 Extracting features from images...")
             features = feature_extractor.extract_features_batch(image_paths)
+            logger.info(f"✅ Features extracted. Shape: {features.shape}")
 
             # Build search index
+            logger.info("🔍 Building search index...")
             similarity_search.build_index(features, image_paths)
+            logger.info("✅ Search index built successfully")
 
             # Save index
+            logger.info("💾 Saving index to disk...")
             similarity_search.save_index()
+            logger.info("✅ Index saved successfully")
 
             index_loaded = True
-            logger.info(f"Search index built for {len(image_paths)} images")
+            logger.info(f"🎉 Search index ready for {len(image_paths)} images")
 
         return True
 
     except Exception as e:
-        logger.error(f"Error initializing search index: {str(e)}")
+        logger.error(f"❌ Error initializing search index: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -91,27 +139,27 @@ def search():
     """
     Handle image upload and search.
     """
-    logger.info("=" * 50)
-    logger.info("NEW SEARCH REQUEST RECEIVED")
-    logger.info("=" * 50)
+    logger.info("=" * 70)
+    logger.info("🔍 NEW SEARCH REQUEST RECEIVED")
+    logger.info("=" * 70)
 
     if not index_loaded:
-        logger.error("Search index not initialized")
+        logger.error("❌ Search index not initialized")
         flash('Search index not initialized. Please wait or check logs.', 'error')
         return redirect(url_for('index'))
 
     # Check if file was uploaded
     if 'file' not in request.files:
-        logger.error("No file in request")
+        logger.error("❌ No file in request")
         flash('No file uploaded', 'error')
         return redirect(url_for('index'))
 
     file = request.files['file']
-    logger.info(f"File received: {file.filename}")
+    logger.info(f"📁 File received: {file.filename}")
 
     # Check if file is selected
     if file.filename == '':
-        logger.error("Empty filename")
+        logger.error("❌ Empty filename")
         flash('No file selected', 'error')
         return redirect(url_for('index'))
 
@@ -119,59 +167,69 @@ def search():
     if file and allowed_file(file.filename):
         try:
             # Save uploaded file
-            logger.info("Saving uploaded file...")
+            logger.info("💾 Saving uploaded file...")
             filepath = save_uploaded_file(file)
 
             if filepath is None:
-                logger.error("Failed to save file")
+                logger.error("❌ Failed to save file")
                 flash('Error saving file', 'error')
                 return redirect(url_for('index'))
 
-            logger.info(f"File saved to: {filepath}")
+            logger.info(f"✅ File saved to: {filepath}")
 
             # Validate image
-            logger.info("Validating image...")
+            logger.info("🔍 Validating image...")
             load_and_validate_image(filepath)
-            logger.info("Image validated successfully")
+            logger.info("✅ Image validated successfully")
 
             # Extract features from uploaded image
-            logger.info(f"Extracting features from {filepath}")
+            logger.info(f"🎨 Extracting features from query image")
             query_features = feature_extractor.extract_features(filepath)
-            logger.info(f"Features extracted. Shape: {query_features.shape}")
+            logger.info(f"✅ Features extracted. Shape: {query_features.shape}")
 
             # Get top_k from form or use default
             top_k = int(request.form.get('top_k', config.TOP_K))
             top_k = min(max(top_k, 1), 50)  # Limit between 1 and 50
-            logger.info(f"Searching for top {top_k} similar images")
+            logger.info(f"🎯 Searching for top {top_k} similar images")
 
-            # Search for similar images
-            results = similarity_search.search(query_features, top_k=top_k)
-            logger.info(f"Search completed. Found {len(results)} results")
-
-            # DEBUG: Log top 5 similarity scores
-            if len(results) > 0:
-                logger.info("--- Top Similarity Scores ---")
-                for idx, (path, score) in enumerate(results[:5]):
-                    logger.info(f"  Top {idx + 1}: score={score:.4f} ({score * 100:.2f}%)")
+            # Search for similar images (with or without reranking)
+            if config.USE_RERANKING:
+                logger.info(f"🔄 Using two-stage search with reranking")
+                logger.info(f"   Stage 1: Retrieving {config.RERANKING_CANDIDATES} candidates")
+                logger.info(f"   Stage 2: Reranking to top {top_k}")
+                results = similarity_search.search_with_reranking(
+                    query_features,
+                    top_k=config.RERANKING_CANDIDATES,
+                    final_k=top_k
+                )
             else:
-                logger.warning("No results returned from search!")
+                logger.info("🔍 Using standard search")
+                results = similarity_search.search(query_features, top_k=top_k)
+
+            logger.info(f"✅ Search completed. Found {len(results)} results")
+
+            # Log top 5 similarity scores
+            if len(results) > 0:
+                logger.info("📊 Top Similarity Scores:")
+                for idx, (path, score) in enumerate(results[:5]):
+                    logger.info(f"   #{idx + 1}: {score:.4f} ({score * 100:.2f}%) - {os.path.basename(path)}")
+            else:
+                logger.warning("⚠️  No results returned from search!")
 
             # Check if no results found
             if len(results) == 0:
-                logger.warning("No similar images found")
+                logger.warning("⚠️  No similar images found")
                 return render_template('result.html',
                                        query_image=os.path.basename(filepath),
                                        similar_images=[],
                                        num_results=0)
 
-            # Get correct relative path for query image (just filename, not uploads/)
+            # Get correct relative path for query image
             query_image = os.path.basename(filepath)
-            logger.info(f"Query image filename: {query_image}")
+            logger.info(f"🖼️  Query image filename: {query_image}")
 
             similar_images = []
             for idx, (img_path, score) in enumerate(results):
-                logger.info(f"  Result {idx + 1}: {img_path} (score: {score:.4f})")
-
                 # Convert absolute path to relative web path
                 if os.path.isabs(img_path):
                     rel_path = os.path.relpath(img_path, config.BASE_DIR)
@@ -180,7 +238,6 @@ def search():
 
                 # Convert backslashes to forward slashes for web
                 rel_path = rel_path.replace('\\', '/')
-                logger.info(f"    Relative path: {rel_path}")
 
                 similar_images.append({
                     'path': rel_path,
@@ -188,8 +245,8 @@ def search():
                     'filename': os.path.basename(img_path)
                 })
 
-            logger.info(f"Rendering result page with {len(similar_images)} images")
-            logger.info("=" * 50)
+            logger.info(f"🎉 Rendering result page with {len(similar_images)} images")
+            logger.info("=" * 70)
 
             return render_template('result.html',
                                    query_image=query_image,
@@ -197,7 +254,7 @@ def search():
                                    num_results=len(similar_images))
 
         except Exception as e:
-            logger.error(f"Error processing image: {str(e)}")
+            logger.error(f"❌ Error processing image: {str(e)}")
             import traceback
             traceback.print_exc()
             return render_template('error.html',
@@ -205,7 +262,7 @@ def search():
                                    error_message=str(e))
 
     else:
-        logger.error(f"Invalid file type: {file.filename}")
+        logger.error(f"❌ Invalid file type: {file.filename}")
         flash('Invalid file type. Allowed types: ' + ', '.join(config.ALLOWED_EXTENSIONS), 'error')
         return redirect(url_for('index'))
 
@@ -216,10 +273,10 @@ def serve_data_file(filename):
     Serve files from data directory.
     """
     try:
-        logger.info(f"Serving data file: {filename}")
+        logger.info(f"📂 Serving data file: {filename}")
         return send_from_directory(config.DATA_FOLDER, filename)
     except Exception as e:
-        logger.error(f"Error serving file {filename}: {str(e)}")
+        logger.error(f"❌ Error serving file {filename}: {str(e)}")
         return "File not found", 404
 
 
@@ -229,16 +286,28 @@ def rebuild_index():
     Rebuild the search index.
     """
     try:
-        logger.info("Rebuilding search index...")
+        logger.info("🔨 Rebuilding search index...")
+
+        # Delete existing index files
+        for file_path in [config.FAISS_INDEX_FILE, config.IMAGE_PATHS_FILE,
+                          config.EMBEDDINGS_FILE, config.PCA_MODEL_FILE]:
+            if file_path.exists():
+                file_path.unlink()
+                logger.info(f"🗑️  Deleted: {file_path}")
+
         success = initialize_search_index()
 
         if success:
             flash('Search index rebuilt successfully', 'success')
+            logger.info("✅ Index rebuild completed successfully")
         else:
             flash('Error rebuilding search index', 'error')
+            logger.error("❌ Index rebuild failed")
 
     except Exception as e:
-        logger.error(f"Error rebuilding index: {str(e)}")
+        logger.error(f"❌ Error rebuilding index: {str(e)}")
+        import traceback
+        traceback.print_exc()
         flash(f'Error: {str(e)}', 'error')
 
     return redirect(url_for('index'))
@@ -251,6 +320,14 @@ def stats():
     """
     if index_loaded:
         stats = similarity_search.get_statistics()
+        stats['config'] = {
+            'model': config.MODEL_NAME,
+            'use_ensemble': config.USE_ENSEMBLE,
+            'use_pca': config.USE_PCA,
+            'use_reranking': config.USE_RERANKING,
+            'image_size': config.IMAGE_SIZE,
+            'top_k': config.TOP_K
+        }
         return jsonify(stats)
     else:
         return jsonify({'error': 'Index not loaded'}), 503
@@ -263,7 +340,13 @@ def health():
     """
     return jsonify({
         'status': 'healthy',
-        'index_loaded': index_loaded
+        'index_loaded': index_loaded,
+        'config': {
+            'model': config.MODEL_NAME,
+            'ensemble': config.USE_ENSEMBLE,
+            'pca': config.USE_PCA,
+            'reranking': config.USE_RERANKING
+        }
     })
 
 
@@ -291,7 +374,7 @@ def internal_error(e):
     """
     Handle 500 errors.
     """
-    logger.error(f"Internal server error: {str(e)}")
+    logger.error(f"❌ Internal server error: {str(e)}")
     return render_template('error.html',
                            error_code=500,
                            error_message='Internal server error'), 500
@@ -299,13 +382,16 @@ def internal_error(e):
 
 if __name__ == '__main__':
     # Clean old uploads on startup
-    logger.info("Cleaning old upload files...")
+    logger.info("🧹 Cleaning old upload files...")
     clean_upload_folder()
 
     # Initialize search index
-    logger.info("Initializing search index...")
+    logger.info("🚀 Initializing search index...")
     initialize_search_index()
 
     # Run app
-    logger.info("Starting Flask application...")
+    logger.info("=" * 70)
+    logger.info("🌐 Starting Flask application...")
+    logger.info(f"📍 Server: http://0.0.0.0:5000")
+    logger.info("=" * 70)
     app.run(debug=True, host='0.0.0.0', port=5000)
